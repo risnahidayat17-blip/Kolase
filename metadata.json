@@ -1,0 +1,6 @@
+{
+  "name": "Kadr Studio",
+  "description": "Studio layout multi-foto dan carousel seamless untuk fotografer profesional di Instagram.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
