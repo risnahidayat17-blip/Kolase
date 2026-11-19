@@ -11,6 +11,16 @@ export interface AspectRatioSpec {
   ratio: number;
 }
 
+export interface FaceRegion {
+  centerX: number; // 0..1 normalized
+  centerY: number; // 0..1 normalized
+  top: number; // 0..1 normalized
+  bottom: number; // 0..1 normalized
+  left: number; // 0..1 normalized
+  right: number; // 0..1 normalized
+  source: 'native' | 'heuristic';
+}
+
 export interface PhotoAsset {
   id: string;
   name: string;
@@ -18,6 +28,8 @@ export interface PhotoAsset {
   width: number;
   height: number;
   isSample?: boolean;
+  faceRegion?: FaceRegion | null;
+  faceChecked?: boolean;
 }
 
 export interface SlotRect {
@@ -60,6 +72,7 @@ export interface SlotState {
   panY: number; // -1 to 1 (0 is centered)
   rotation: number; // 0 | 90 | 180 | 270
   flipH: boolean;
+  manualPan?: boolean;
 }
 
 export type TonePresetId =

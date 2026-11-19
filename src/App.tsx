@@ -19,6 +19,7 @@ import {
   StudioMode,
 } from './types/studio';
 import { renderExportCanvases } from './utils/canvasRenderer';
+import { computeAutoPanForSlot, detectPhotoFocus } from './utils/faceDetector';
 
 function createDefaultSlotState(photoId: string | null): SlotState {
   return {
@@ -28,6 +29,7 @@ function createDefaultSlotState(photoId: string | null): SlotState {
     panY: 0,
     rotation: 0,
     flipH: false,
+    manualPan: false,
   };
 }
 
@@ -47,7 +49,8 @@ function readImageFile(file: File): Promise<PhotoAsset> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
+      const faceRegion = await detectPhotoFocus(url);
       resolve({
         id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name: file.name,
@@ -55,6 +58,8 @@ function readImageFile(file: File): Promise<PhotoAsset> {
         width: img.naturalWidth || 1200,
         height: img.naturalHeight || 1500,
         isSample: false,
+        faceRegion,
+        faceChecked: true,
       });
     };
     img.onerror = () => {
@@ -101,6 +106,7 @@ export default function App() {
   );
 
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [autoCenterFace, setAutoCenterFace] = useState<boolean>(true);
 
   const [settings, setSettings] = useState<CanvasSettings>({
     aspectRatio: '4:5',
@@ -142,30 +148,131 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toastMessage]);
 
-  // Synchronize slotStates whenever slots list changes
+  const applyAutoFaceToStates = useCallback(
+    (
+      statesMap: Record<string, SlotState>,
+      targetSlots: SlotRect[],
+      currentPhotos: PhotoAsset[],
+      targetMode: StudioMode,
+      targetSlideCount: number,
+      targetSettings: CanvasSettings,
+      respectManualPan: boolean
+    ): Record<string, SlotState> => {
+      const next: Record<string, SlotState> = {};
+      for (const slot of targetSlots) {
+        const st = statesMap[slot.id] ?? createDefaultSlotState(null);
+        const photo = st.photoId
+          ? currentPhotos.find((p) => p.id === st.photoId)
+          : undefined;
+
+        if (photo?.faceRegion && (!respectManualPan || !st.manualPan)) {
+          const { panX, panY } = computeAutoPanForSlot({
+            photo,
+            slotId: slot.id,
+            mode: targetMode,
+            slideCount: targetSlideCount,
+            slots: targetSlots,
+            settings: targetSettings,
+            state: st,
+          });
+          next[slot.id] = {
+            ...st,
+            panX,
+            panY,
+            manualPan: respectManualPan ? st.manualPan : false,
+          };
+        } else {
+          next[slot.id] = respectManualPan
+            ? st
+            : { ...st, panX: 0, panY: 0, manualPan: false };
+        }
+      }
+      return next;
+    },
+    []
+  );
+
+  // Detect faces asynchronously for sample/unchecked photos and auto-center active slots
+  useEffect(() => {
+    const unchecked = photos.filter((p) => !p.faceChecked);
+    if (unchecked.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      unchecked.map(async (p) => ({
+        id: p.id,
+        faceRegion: await detectPhotoFocus(p.url),
+      }))
+    ).then((results) => {
+      if (cancelled) return;
+      const resultMap = new Map(results.map((r) => [r.id, r.faceRegion]));
+      setPhotos((prev) => {
+        const updated = prev.map((p) =>
+          resultMap.has(p.id)
+            ? { ...p, faceRegion: resultMap.get(p.id) ?? null, faceChecked: true }
+            : p
+        );
+        if (autoCenterFace) {
+          setSlotStates((prevStates) =>
+            applyAutoFaceToStates(
+              prevStates,
+              activeSlots,
+              updated,
+              mode,
+              activeSlideCount,
+              settings,
+              true
+            )
+          );
+        }
+        return updated;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [photos, autoCenterFace, activeSlots, mode, activeSlideCount, settings, applyAutoFaceToStates]);
+
+  // Synchronize slotStates whenever template or mode changes
   const syncSlotsWithTemplate = useCallback(
-    (nextSlots: SlotRect[], currentPhotos: PhotoAsset[]) => {
+    (
+      nextSlots: SlotRect[],
+      currentPhotos: PhotoAsset[],
+      nextMode: StudioMode,
+      nextSlideCount: number
+    ) => {
       setSlotStates((prev) => {
         const prevValues = Object.values(prev).filter((s) => s.photoId);
-        const next: Record<string, SlotState> = {};
+        const mapped: Record<string, SlotState> = {};
         nextSlots.forEach((slot, idx) => {
-          if (prev[slot.id]) {
-            next[slot.id] = prev[slot.id];
+          if (prev[slot.id]?.photoId) {
+            mapped[slot.id] = createDefaultSlotState(prev[slot.id].photoId);
           } else if (prevValues[idx]?.photoId) {
-            next[slot.id] = createDefaultSlotState(prevValues[idx].photoId);
+            mapped[slot.id] = createDefaultSlotState(prevValues[idx].photoId);
           } else if (currentPhotos.length > 0) {
-            next[slot.id] = createDefaultSlotState(
+            mapped[slot.id] = createDefaultSlotState(
               currentPhotos[idx % currentPhotos.length].id
             );
           } else {
-            next[slot.id] = createDefaultSlotState(null);
+            mapped[slot.id] = createDefaultSlotState(null);
           }
         });
-        return next;
+
+        if (!autoCenterFace) return mapped;
+        return applyAutoFaceToStates(
+          mapped,
+          nextSlots,
+          currentPhotos,
+          nextMode,
+          nextSlideCount,
+          settings,
+          false
+        );
       });
       setSelectedSlotId(null);
     },
-    []
+    [autoCenterFace, applyAutoFaceToStates, settings]
   );
 
   const handleSelectMode = useCallback(
@@ -175,9 +282,17 @@ export default function App() {
         nextMode === 'collage'
           ? activeCollageTemplate.slots
           : activeCarouselTemplate.slots;
-      syncSlotsWithTemplate(nextSlots, photos);
+      const nextSlideCount =
+        nextMode === 'collage' ? 1 : activeCarouselTemplate.slideCount;
+      syncSlotsWithTemplate(nextSlots, photos, nextMode, nextSlideCount);
     },
-    [activeCollageTemplate.slots, activeCarouselTemplate.slots, photos, syncSlotsWithTemplate]
+    [
+      activeCollageTemplate.slots,
+      activeCarouselTemplate.slots,
+      activeCarouselTemplate.slideCount,
+      photos,
+      syncSlotsWithTemplate,
+    ]
   );
 
   const handleSelectTemplate = useCallback(
@@ -185,11 +300,11 @@ export default function App() {
       if (mode === 'collage') {
         setCollageTemplateId(templateId);
         const tpl = COLLAGE_TEMPLATES.find((t) => t.id === templateId);
-        if (tpl) syncSlotsWithTemplate(tpl.slots, photos);
+        if (tpl) syncSlotsWithTemplate(tpl.slots, photos, 'collage', 1);
       } else {
         setCarouselTemplateId(templateId);
         const tpl = CAROUSEL_TEMPLATES.find((t) => t.id === templateId);
-        if (tpl) syncSlotsWithTemplate(tpl.slots, photos);
+        if (tpl) syncSlotsWithTemplate(tpl.slots, photos, 'carousel', tpl.slideCount);
       }
     },
     [mode, photos, syncSlotsWithTemplate]
@@ -204,18 +319,31 @@ export default function App() {
 
       try {
         const uploaded = await Promise.all(files.map(readImageFile));
-        setPhotos((prev) => {
-          const updated = [...uploaded, ...prev];
-          return updated;
-        });
+        const nextPhotos = [...uploaded, ...photos];
+        setPhotos(nextPhotos);
 
-        // Automatically fill empty slots if any exist
+        // Automatically fill empty slots if any exist, centered on face
         setSlotStates((prev) => {
           const next = { ...prev };
           let uploadIdx = 0;
           for (const slot of activeSlots) {
             if (!next[slot.id]?.photoId && uploadIdx < uploaded.length) {
-              next[slot.id] = createDefaultSlotState(uploaded[uploadIdx].id);
+              const photo = uploaded[uploadIdx];
+              const baseState = createDefaultSlotState(photo.id);
+              if (autoCenterFace && photo.faceRegion) {
+                const { panX, panY } = computeAutoPanForSlot({
+                  photo,
+                  slotId: slot.id,
+                  mode,
+                  slideCount: activeSlideCount,
+                  slots: activeSlots,
+                  settings,
+                  state: baseState,
+                });
+                next[slot.id] = { ...baseState, panX, panY };
+              } else {
+                next[slot.id] = baseState;
+              }
               uploadIdx++;
             }
           }
@@ -227,7 +355,7 @@ export default function App() {
         showToast('Sebagian file tidak dapat dibaca sebagai gambar.');
       }
     },
-    [activeSlots, showToast]
+    [activeSlots, activeSlideCount, autoCenterFace, mode, photos, settings, showToast]
   );
 
   const handleUploadToSlot = useCallback(
@@ -238,16 +366,32 @@ export default function App() {
       if (files.length === 0) return;
       try {
         const uploaded = await Promise.all(files.map(readImageFile));
+        const photo = uploaded[0];
         setPhotos((prev) => [...uploaded, ...prev]);
+
+        const baseState = createDefaultSlotState(photo.id);
+        let finalState = baseState;
+        if (autoCenterFace && photo.faceRegion) {
+          const { panX, panY } = computeAutoPanForSlot({
+            photo,
+            slotId,
+            mode,
+            slideCount: activeSlideCount,
+            slots: activeSlots,
+            settings,
+            state: baseState,
+          });
+          finalState = { ...baseState, panX, panY };
+        }
         setSlotStates((prev) => ({
           ...prev,
-          [slotId]: createDefaultSlotState(uploaded[0].id),
+          [slotId]: finalState,
         }));
       } catch {
         showToast('Gagal memuat foto ke frame.');
       }
     },
-    [showToast]
+    [activeSlots, activeSlideCount, autoCenterFace, mode, settings, showToast]
   );
 
   const handleRemovePhoto = useCallback((photoId: string) => {
@@ -269,12 +413,32 @@ export default function App() {
     });
   }, []);
 
+  const createFramedStateForSlot = useCallback(
+    (slotId: string, photoId: string): SlotState => {
+      const baseState = createDefaultSlotState(photoId);
+      if (!autoCenterFace) return baseState;
+      const photo = photos.find((p) => p.id === photoId);
+      if (!photo?.faceRegion) return baseState;
+      const { panX, panY } = computeAutoPanForSlot({
+        photo,
+        slotId,
+        mode,
+        slideCount: activeSlideCount,
+        slots: activeSlots,
+        settings,
+        state: baseState,
+      });
+      return { ...baseState, panX, panY };
+    },
+    [activeSlots, activeSlideCount, autoCenterFace, mode, photos, settings]
+  );
+
   const handleAssignPhotoToSelected = useCallback(
     (photoId: string) => {
       if (selectedSlotId) {
         setSlotStates((prev) => ({
           ...prev,
-          [selectedSlotId]: createDefaultSlotState(photoId),
+          [selectedSlotId]: createFramedStateForSlot(selectedSlotId, photoId),
         }));
         return;
       }
@@ -284,12 +448,12 @@ export default function App() {
       if (targetSlot) {
         setSlotStates((prev) => ({
           ...prev,
-          [targetSlot.id]: createDefaultSlotState(photoId),
+          [targetSlot.id]: createFramedStateForSlot(targetSlot.id, photoId),
         }));
         setSelectedSlotId(targetSlot.id);
       }
     },
-    [selectedSlotId, activeSlots, slotStates]
+    [selectedSlotId, activeSlots, slotStates, createFramedStateForSlot]
   );
 
   const handleAutoFill = useCallback(() => {
@@ -300,11 +464,14 @@ export default function App() {
     setSlotStates(() => {
       const next: Record<string, SlotState> = {};
       activeSlots.forEach((slot, idx) => {
-        next[slot.id] = createDefaultSlotState(photos[idx % photos.length].id);
+        next[slot.id] = createFramedStateForSlot(
+          slot.id,
+          photos[idx % photos.length].id
+        );
       });
       return next;
     });
-  }, [activeSlots, photos, showToast]);
+  }, [activeSlots, photos, createFramedStateForSlot, showToast]);
 
   const handleShufflePhotos = useCallback(() => {
     if (photos.length === 0) return;
@@ -312,47 +479,203 @@ export default function App() {
     setSlotStates(() => {
       const next: Record<string, SlotState> = {};
       activeSlots.forEach((slot, idx) => {
-        next[slot.id] = createDefaultSlotState(pool[idx % pool.length].id);
+        next[slot.id] = createFramedStateForSlot(
+          slot.id,
+          pool[idx % pool.length].id
+        );
       });
       return next;
     });
-  }, [activeSlots, photos]);
+  }, [activeSlots, photos, createFramedStateForSlot]);
 
   const handleUpdateSlotState = useCallback(
     (slotId: string, patch: Partial<SlotState>) => {
-      setSlotStates((prev) => ({
-        ...prev,
-        [slotId]: {
-          ...(prev[slotId] ?? createDefaultSlotState(null)),
-          ...patch,
-        },
-      }));
+      setSlotStates((prev) => {
+        const current = prev[slotId] ?? createDefaultSlotState(null);
+        const updated: SlotState = { ...current, ...patch };
+        const shouldReframe =
+          autoCenterFace &&
+          !updated.manualPan &&
+          updated.photoId &&
+          (patch.rotation !== undefined ||
+            patch.flipH !== undefined ||
+            patch.zoom !== undefined);
+
+        if (shouldReframe) {
+          const photo = photos.find((p) => p.id === updated.photoId);
+          if (photo?.faceRegion) {
+            const { panX, panY } = computeAutoPanForSlot({
+              photo,
+              slotId,
+              mode,
+              slideCount: activeSlideCount,
+              slots: activeSlots,
+              settings,
+              state: updated,
+            });
+            return {
+              ...prev,
+              [slotId]: { ...updated, panX, panY },
+            };
+          }
+        }
+        return {
+          ...prev,
+          [slotId]: updated,
+        };
+      });
     },
-    []
+    [activeSlots, activeSlideCount, autoCenterFace, mode, photos, settings]
   );
 
-  const handleSwapSlots = useCallback((slotIdA: string, slotIdB: string) => {
-    setSlotStates((prev) => {
-      const a = prev[slotIdA] ?? createDefaultSlotState(null);
-      const b = prev[slotIdB] ?? createDefaultSlotState(null);
-      return {
+  const handleSwapSlots = useCallback(
+    (slotIdA: string, slotIdB: string) => {
+      setSlotStates((prev) => {
+        const a = prev[slotIdA] ?? createDefaultSlotState(null);
+        const b = prev[slotIdB] ?? createDefaultSlotState(null);
+        const swappedA = a.photoId
+          ? createFramedStateForSlot(slotIdB, a.photoId)
+          : createDefaultSlotState(null);
+        const swappedB = b.photoId
+          ? createFramedStateForSlot(slotIdA, b.photoId)
+          : createDefaultSlotState(null);
+        return {
+          ...prev,
+          [slotIdA]: swappedB,
+          [slotIdB]: swappedA,
+        };
+      });
+    },
+    [createFramedStateForSlot]
+  );
+
+  const handleDropPhotoOnSlot = useCallback(
+    (slotId: string, photoId: string) => {
+      setSlotStates((prev) => ({
         ...prev,
-        [slotIdA]: { ...b },
-        [slotIdB]: { ...a },
-      };
+        [slotId]: createFramedStateForSlot(slotId, photoId),
+      }));
+    },
+    [createFramedStateForSlot]
+  );
+
+  const handleFocusFaceSlot = useCallback(
+    async (slotId: string) => {
+      const state = slotStates[slotId];
+      if (!state?.photoId) return;
+      let photo = photos.find((p) => p.id === state.photoId);
+      if (!photo) return;
+
+      if (!photo.faceChecked) {
+        const region = await detectPhotoFocus(photo.url);
+        photo = { ...photo, faceRegion: region, faceChecked: true };
+        setPhotos((prev) =>
+          prev.map((p) => (p.id === photo!.id ? photo! : p))
+        );
+      }
+
+      if (!photo.faceRegion) {
+        setSlotStates((prev) => ({
+          ...prev,
+          [slotId]: { ...state, panX: 0, panY: 0, manualPan: false },
+        }));
+        showToast('Wajah tidak terdeteksi, posisi dikembalikan ke tengah.');
+        return;
+      }
+
+      const { panX, panY } = computeAutoPanForSlot({
+        photo,
+        slotId,
+        mode,
+        slideCount: activeSlideCount,
+        slots: activeSlots,
+        settings,
+        state,
+      });
+
+      setSlotStates((prev) => ({
+        ...prev,
+        [slotId]: { ...state, panX, panY, manualPan: false },
+      }));
+      showToast('Posisi frame dipusatkan ke wajah.');
+    },
+    [
+      activeSlots,
+      activeSlideCount,
+      mode,
+      photos,
+      settings,
+      slotStates,
+      showToast,
+    ]
+  );
+
+  const handleToggleAutoCenterFace = useCallback(() => {
+    setAutoCenterFace((prev) => {
+      const nextVal = !prev;
+      if (nextVal) {
+        setSlotStates((curr) =>
+          applyAutoFaceToStates(
+            curr,
+            activeSlots,
+            photos,
+            mode,
+            activeSlideCount,
+            settings,
+            false
+          )
+        );
+        showToast('Auto Wajah diaktifkan — frame dipusatkan ke wajah.');
+      } else {
+        showToast('Auto Wajah dinonaktifkan.');
+      }
+      return nextVal;
     });
-  }, []);
+  }, [
+    activeSlots,
+    activeSlideCount,
+    applyAutoFaceToStates,
+    mode,
+    photos,
+    settings,
+    showToast,
+  ]);
 
-  const handleDropPhotoOnSlot = useCallback((slotId: string, photoId: string) => {
-    setSlotStates((prev) => ({
-      ...prev,
-      [slotId]: createDefaultSlotState(photoId),
-    }));
-  }, []);
-
-  const handleUpdateSettings = useCallback((patch: Partial<CanvasSettings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }));
-  }, []);
+  const handleUpdateSettings = useCallback(
+    (patch: Partial<CanvasSettings>) => {
+      setSettings((prev) => {
+        const nextSettings = { ...prev, ...patch };
+        if (
+          autoCenterFace &&
+          (patch.aspectRatio !== undefined ||
+            patch.marginPx !== undefined ||
+            patch.gapPx !== undefined ||
+            patch.showExifFooter !== undefined)
+        ) {
+          setSlotStates((curr) =>
+            applyAutoFaceToStates(
+              curr,
+              activeSlots,
+              photos,
+              mode,
+              activeSlideCount,
+              nextSettings,
+              true
+            )
+          );
+        }
+        return nextSettings;
+      });
+    },
+    [
+      activeSlots,
+      activeSlideCount,
+      applyAutoFaceToStates,
+      autoCenterFace,
+      mode,
+      photos,
+    ]
+  );
 
   const handleUpdateExportOptions = useCallback(
     (patch: Partial<ExportOptions>) => {
@@ -508,6 +831,9 @@ export default function App() {
           photos={photos}
           settings={settings}
           selectedSlotId={selectedSlotId}
+          autoCenterFace={autoCenterFace}
+          onToggleAutoCenterFace={handleToggleAutoCenterFace}
+          onFocusFaceSlot={handleFocusFaceSlot}
           onSelectSlot={setSelectedSlotId}
           onUpdateSlotState={handleUpdateSlotState}
           onSwapSlots={handleSwapSlots}

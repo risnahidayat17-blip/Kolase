@@ -8,6 +8,7 @@ import {
   Trash2,
   ZoomIn,
   Maximize2,
+  ScanFace,
 } from 'lucide-react';
 import { ASPECT_RATIOS, TONE_PRESETS } from '../data/templates';
 import {
@@ -27,6 +28,9 @@ interface StudioCanvasProps {
   photos: PhotoAsset[];
   settings: CanvasSettings;
   selectedSlotId: string | null;
+  autoCenterFace: boolean;
+  onToggleAutoCenterFace: () => void;
+  onFocusFaceSlot: (slotId: string) => void;
   onSelectSlot: (slotId: string | null) => void;
   onUpdateSlotState: (slotId: string, patch: Partial<SlotState>) => void;
   onSwapSlots: (slotIdA: string, slotIdB: string) => void;
@@ -51,6 +55,9 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
   photos,
   settings,
   selectedSlotId,
+  autoCenterFace,
+  onToggleAutoCenterFace,
+  onFocusFaceSlot,
   onSelectSlot,
   onUpdateSlotState,
   onSwapSlots,
@@ -162,7 +169,11 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
         ? Math.max(-1, Math.min(1, drag.startPanY - dy / drag.maxPanY))
         : 0;
 
-    onUpdateSlotState(drag.slotId, { panX: nextPanX, panY: nextPanY });
+    onUpdateSlotState(drag.slotId, {
+      panX: nextPanX,
+      panY: nextPanY,
+      manualPan: true,
+    });
   };
 
   const handlePointerUp = () => {
@@ -211,6 +222,20 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onToggleAutoCenterFace}
+            title="Otomatis pusatkan posisi wajah saat ganti template atau foto"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+              autoCenterFace
+                ? 'text-[#F2B705] bg-[#F2B705]/12 border-[#F2B705]/40'
+                : 'text-zinc-400 bg-zinc-900 border-zinc-800 hover:text-zinc-200'
+            }`}
+          >
+            <ScanFace className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Auto Wajah: {autoCenterFace ? 'Aktif' : 'Nonaktif'}</span>
+          </button>
+
           {mode === 'carousel' && (
             <button
               type="button"
@@ -605,6 +630,16 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              {selectedSlotState.photoId && (
+                <button
+                  type="button"
+                  onClick={() => onFocusFaceSlot(selectedSlotId)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[#F2B705] hover:bg-[#F2B705]/10 border border-[#F2B705]/30 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <ScanFace className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Fokus Wajah</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() =>
@@ -614,6 +649,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
                     panY: 0,
                     rotation: 0,
                     flipH: false,
+                    manualPan: false,
                   })
                 }
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-zinc-400 hover:text-zinc-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
@@ -630,6 +666,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
                       zoom: 1,
                       panX: 0,
                       panY: 0,
+                      manualPan: false,
                     })
                   }
                   className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-rose-400 hover:text-rose-300 rounded-md transition-colors whitespace-nowrap cursor-pointer"
